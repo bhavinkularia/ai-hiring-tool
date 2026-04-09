@@ -3,10 +3,11 @@ from docx import Document
 import pdfplumber
 import anthropic
 import os
+from io import BytesIO
 
 # -------- CONFIG --------
 client = anthropic.Anthropic(
-    api_key=os.getenv("ANTHROPIC_API_KEY") 
+    api_key=os.getenv("ANTHROPIC_API_KEY")
 )
 
 st.title("AI Hiring Assistant")
@@ -75,7 +76,7 @@ Gaps:
     return response.content[0].text
 
 
-# -------- REPORT GENERATION --------
+# -------- REPORT GENERATION (FIXED) --------
 def generate_report(top_candidates):
     doc = Document()
     doc.add_heading('Top Candidates Report', 0)
@@ -84,10 +85,11 @@ def generate_report(top_candidates):
         doc.add_heading(f"{i}. {candidate['name']} (Score: {candidate['score']})", level=2)
         doc.add_paragraph(candidate["analysis"])
 
-    file_path = "output/top_candidates.docx"
-    doc.save(file_path)
+    buffer = BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
 
-    return file_path
+    return buffer
 
 
 # -------- JD UPLOAD --------
@@ -160,7 +162,7 @@ if analyze_clicked:
         # Sort candidates
         sorted_results = sorted(results, key=lambda x: x["score"], reverse=True)
 
-        # Dynamic Top N
+        # Top N
         top_candidates = sorted_results[:top_n]
 
         # Display
@@ -170,12 +172,11 @@ if analyze_clicked:
             st.divider()
 
         # -------- DOWNLOAD REPORT --------
-        report_path = generate_report(top_candidates)
+        report_file = generate_report(top_candidates)
 
-        with open(report_path, "rb") as file:
-            st.download_button(
-                label="📄 Download Report",
-                data=file,
-                file_name="Top_Candidates_Report.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            )
+        st.download_button(
+            label="📄 Download Report",
+            data=report_file,
+            file_name="Top_Candidates_Report.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
