@@ -5,7 +5,7 @@ import anthropic
 
 # -------- CONFIG --------
 client = anthropic.Anthropic(
-    api_key="YOUR_API_KEY_HERE" 
+    api_key=os.getenv("ANTHROPIC_API_KEY") 
 )
 
 st.title("AI Hiring Assistant")
