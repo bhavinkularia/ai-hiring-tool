@@ -2,6 +2,7 @@ import streamlit as st
 from docx import Document
 import pdfplumber
 import anthropic
+import os
 
 # -------- CONFIG --------
 client = anthropic.Anthropic(
