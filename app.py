@@ -35,46 +35,52 @@ def extract_score(text):
         return 0
 
 
-# -------- STEP 1: EDUCATION DETECTION (REASONING) --------
-def detect_education(resume_text):
-    prompt = f"""
-You are an expert recruiter.
+# -------- RULE-BASED DEGREE DETECTION --------
+def detect_degree_rules(text):
+    t = text.lower()
 
-Your task is to identify the candidate's education EVEN IF NOT EXPLICITLY WRITTEN.
+    signals = []
 
-Resume:
-{resume_text}
+    # MBA / B-School detection
+    if any(x in t for x in ["iim", "isb", "spjimr", "nmims", "mdi", "xlri"]):
+        signals.append("MBA (Top B-School inferred)")
 
-Instructions:
-- Look for indirect signals:
-  - email domains (e.g. iimranchi.ac.in → MBA)
-  - institute names (IIM → MBA, IIT → Engineer)
-  - internships, batch patterns
-  - any contextual clues
+    # Engineering detection
+    if any(x in t for x in ["b.tech", "m.tech", "iit", "nit", "engineering"]):
+        signals.append("Engineering")
 
-IMPORTANT RULE:
-If candidate is from ANY IIM, assume MBA unless strongly contradicted.
+    # CA detection
+    if "chartered accountant" in t or "ca " in t:
+        signals.append("Chartered Accountant (CA)")
 
-Think step-by-step.
+    # Design detection
+    if any(x in t for x in ["design", "ux", "ui", "nid", "nift"]):
+        signals.append("Design / UX")
 
-Return ONLY:
+    # Commerce / Finance
+    if any(x in t for x in ["b.com", "m.com", "finance", "accounting"]):
+        signals.append("Commerce / Finance")
 
-Education: <your conclusion>
-Confidence: <High/Medium/Low>
-Reasoning: <short explanation>
-"""
+    if not signals:
+        signals.append("Unknown")
 
-    response = client.messages.create(
-        model="claude-sonnet-4-0",
-        max_tokens=300,
-        messages=[{"role": "user", "content": prompt}]
-    )
-
-    return response.content[0].text
+    return signals
 
 
-# -------- STEP 2: SCORING --------
-def get_candidate_score(jd_text, resume_text, education_info):
+# -------- ENRICH RESUME --------
+def enrich_resume(resume_text):
+    detected_degrees = detect_degree_rules(resume_text)
+
+    enriched = resume_text + "\n\n### SYSTEM DETECTED SIGNALS ###\n"
+
+    for d in detected_degrees:
+        enriched += f"- {d}\n"
+
+    return enriched, detected_degrees
+
+
+# -------- AI SCORING --------
+def get_candidate_score(jd_text, resume_text, detected_degrees):
     prompt = f"""
 You are an expert recruiter.
 
@@ -84,12 +90,14 @@ Job Description:
 Candidate Resume:
 {resume_text}
 
-Detected Education:
-{education_info}
+System Detected Education:
+{detected_degrees}
 
-IMPORTANT:
-- TRUST inferred education above missing text
-- DO NOT assume "no MBA" if inferred MBA exists
+IMPORTANT RULES:
+- System-detected education is HIGH confidence
+- If IIM or top B-school detected → assume MBA
+- DO NOT reject candidate due to missing explicit degree if signals exist
+- Use reasoning, not just explicit text
 
 Evaluate candidate.
 
@@ -181,16 +189,16 @@ if analyze_clicked:
             results = []
 
             for file in resume_files:
-                resume_text = extract_text(file)[:3000]
+                raw_text = extract_text(file)[:3000]
 
-                # STEP 1: Education reasoning
-                education_info = detect_education(resume_text)
+                # Step 1: Enrich with rules
+                enriched_text, detected_degrees = enrich_resume(raw_text)
 
-                # STEP 2: Scoring
+                # Step 2: AI scoring with strong signals
                 analysis = get_candidate_score(
                     jd_text[:2000],
-                    resume_text,
-                    education_info
+                    enriched_text,
+                    detected_degrees
                 )
 
                 score = extract_score(analysis)
