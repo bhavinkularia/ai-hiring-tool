@@ -4,6 +4,7 @@ import pdfplumber
 import anthropic
 import os
 from io import BytesIO
+import json
 
 # -------- CONFIG --------
 client = anthropic.Anthropic(
@@ -25,85 +26,79 @@ def extract_text(file):
         return "\n".join([para.text for para in doc.paragraphs])
 
 
+# -------- SAFE JSON PARSER --------
+def safe_json_load(text):
+    try:
+        start = text.find("{")
+        end = text.rfind("}") + 1
+        return json.loads(text[start:end])
+    except:
+        return None
+
+
 # -------- SCORE EXTRACTION --------
 def extract_score(text):
     try:
         for line in text.split("\n"):
             if "Score" in line:
-                return int(line.split(":")[1].strip())
+                return int(line.split(":")[1].replace("%", "").strip())
     except:
         return 0
 
 
-# -------- RULE-BASED DEGREE DETECTION --------
-def detect_degree_rules(text):
-    t = text.lower()
+# -------- STEP 1: PROFILE EXTRACTION --------
+def extract_candidate_profile(resume_text):
+    prompt = f"""
+Extract structured candidate data.
 
-    signals = []
+Resume:
+{resume_text}
 
-    # MBA / B-School detection
-    if any(x in t for x in ["iim", "isb", "spjimr", "nmims", "mdi", "xlri"]):
-        signals.append("MBA (Top B-School inferred)")
+Return ONLY JSON:
 
-    # Engineering detection
-    if any(x in t for x in ["b.tech", "m.tech", "iit", "nit", "engineering"]):
-        signals.append("Engineering")
+{{
+  "education": [],
+  "skills": [],
+  "experience_years": "",
+  "confidence": "High/Medium/Low"
+}}
 
-    # CA detection
-    if "chartered accountant" in t or "ca " in t:
-        signals.append("Chartered Accountant (CA)")
+IMPORTANT:
+- Infer missing info if possible
+"""
 
-    # Design detection
-    if any(x in t for x in ["design", "ux", "ui", "nid", "nift"]):
-        signals.append("Design / UX")
+    response = client.messages.create(
+        model="claude-sonnet-4-0",
+        max_tokens=400,
+        messages=[{"role": "user", "content": prompt}]
+    )
 
-    # Commerce / Finance
-    if any(x in t for x in ["b.com", "m.com", "finance", "accounting"]):
-        signals.append("Commerce / Finance")
+    parsed = safe_json_load(response.content[0].text)
 
-    if not signals:
-        signals.append("Unknown")
-
-    return signals
-
-
-# -------- ENRICH RESUME --------
-def enrich_resume(resume_text):
-    detected_degrees = detect_degree_rules(resume_text)
-
-    enriched = resume_text + "\n\n### SYSTEM DETECTED SIGNALS ###\n"
-
-    for d in detected_degrees:
-        enriched += f"- {d}\n"
-
-    return enriched, detected_degrees
+    if parsed:
+        return parsed, False  # no issue
+    else:
+        return {"raw": resume_text}, True  # parsing issue
 
 
-# -------- AI SCORING --------
-def get_candidate_score(jd_text, resume_text, detected_degrees):
+# -------- STEP 2: SCORING --------
+def get_candidate_score(jd_text, profile):
     prompt = f"""
 You are an expert recruiter.
 
 Job Description:
 {jd_text}
 
-Candidate Resume:
-{resume_text}
+Candidate Profile:
+{profile}
 
-System Detected Education:
-{detected_degrees}
-
-IMPORTANT RULES:
-- System-detected education is HIGH confidence
-- If IIM or top B-school detected → assume MBA
-- DO NOT reject candidate due to missing explicit degree if signals exist
-- Use reasoning, not just explicit text
-
-Evaluate candidate.
+Evaluate how well candidate matches JD.
 
 Return ONLY:
 
-Score: <number>
+Score: <percentage between 0-100>
+
+Confidence: <High/Medium/Low>
 
 Strengths:
 - ...
@@ -125,6 +120,20 @@ Gaps:
     return response.content[0].text
 
 
+# -------- REVIEW FLAG --------
+def get_review_flag(profile_issue, analysis_text):
+    if profile_issue:
+        return "YES (Parsing Issue)"
+
+    if "Confidence: Low" in analysis_text:
+        return "YES (Low Confidence)"
+
+    if "not enough information" in analysis_text.lower():
+        return "YES (Incomplete Data)"
+
+    return "NO"
+
+
 # -------- REPORT GENERATION --------
 def generate_report(top_candidates):
     doc = Document()
@@ -132,7 +141,7 @@ def generate_report(top_candidates):
 
     for i, candidate in enumerate(top_candidates, 1):
         doc.add_heading(
-            f"{i}. {candidate['name']} (Score: {candidate['score']})",
+            f"{i}. {candidate['name']} | Match: {candidate['score']}% | Review: {candidate['review']}",
             level=2
         )
         doc.add_paragraph(candidate["analysis"])
@@ -175,7 +184,6 @@ top_n = st.slider(
     value=3
 )
 
-
 # -------- ANALYZE BUTTON --------
 analyze_clicked = st.button("🔍 Analyze Candidates")
 
@@ -189,33 +197,36 @@ if analyze_clicked:
             results = []
 
             for file in resume_files:
-                raw_text = extract_text(file)[:3000]
+                resume_text = extract_text(file)[:3000]
 
-                # Step 1: Enrich with rules
-                enriched_text, detected_degrees = enrich_resume(raw_text)
+                # Step 1
+                profile, profile_issue = extract_candidate_profile(resume_text)
 
-                # Step 2: AI scoring with strong signals
-                analysis = get_candidate_score(
-                    jd_text[:2000],
-                    enriched_text,
-                    detected_degrees
-                )
+                # Step 2
+                analysis = get_candidate_score(jd_text[:2000], profile)
 
                 score = extract_score(analysis)
+
+                # Step 3: Review flag
+                review_flag = get_review_flag(profile_issue, analysis)
 
                 results.append({
                     "name": file.name,
                     "score": score,
-                    "analysis": analysis
+                    "analysis": analysis,
+                    "review": review_flag
                 })
 
-            # Sort + select top N
+            # Sort
             sorted_results = sorted(results, key=lambda x: x["score"], reverse=True)
-            top_candidates = sorted_results[:top_n]
+
+            # Buffer shortlist (VERY IMPORTANT)
+            buffer = int(top_n * 2.5)
+            top_candidates = sorted_results[:buffer]
 
         st.success("✅ Analysis complete")
 
-        # -------- DOWNLOAD ONLY --------
+        # -------- DOWNLOAD --------
         report_file = generate_report(top_candidates)
 
         st.download_button(
