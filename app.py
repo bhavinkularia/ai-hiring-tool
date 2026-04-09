@@ -4,7 +4,6 @@ import pdfplumber
 import anthropic
 import os
 from io import BytesIO
-import json
 
 # -------- CONFIG --------
 client = anthropic.Anthropic(
@@ -36,73 +35,63 @@ def extract_score(text):
         return 0
 
 
-# -------- SAFE JSON PARSER --------
-def safe_json_load(raw_text):
-    try:
-        start = raw_text.find("{")
-        end = raw_text.rfind("}") + 1
-        json_str = raw_text[start:end]
-        return json.loads(json_str)
-    except:
-        return None
-
-
-# -------- STEP 1: PROFILE EXTRACTION --------
-def extract_candidate_profile(resume_text):
+# -------- STEP 1: EDUCATION DETECTION (REASONING) --------
+def detect_education(resume_text):
     prompt = f"""
-Extract structured candidate data from this resume.
+You are an expert recruiter.
 
-Return ONLY JSON.
+Your task is to identify the candidate's education EVEN IF NOT EXPLICITLY WRITTEN.
 
 Resume:
 {resume_text}
 
-Format:
-{{
-  "education": [],
-  "current_status": "",
-  "skills": [],
-  "experience_years": "",
-  "domain": "",
-  "inferences": []
-}}
+Instructions:
+- Look for indirect signals:
+  - email domains (e.g. iimranchi.ac.in → MBA)
+  - institute names (IIM → MBA, IIT → Engineer)
+  - internships, batch patterns
+  - any contextual clues
 
-IMPORTANT:
-- Infer missing info using context (email, institute, etc.)
-- Do NOT return anything except JSON
+IMPORTANT RULE:
+If candidate is from ANY IIM, assume MBA unless strongly contradicted.
+
+Think step-by-step.
+
+Return ONLY:
+
+Education: <your conclusion>
+Confidence: <High/Medium/Low>
+Reasoning: <short explanation>
 """
 
     response = client.messages.create(
         model="claude-sonnet-4-0",
-        max_tokens=500,
+        max_tokens=300,
         messages=[{"role": "user", "content": prompt}]
     )
 
-    raw_output = response.content[0].text
-    parsed = safe_json_load(raw_output)
-
-    if parsed:
-        return parsed
-    else:
-        return {"fallback": resume_text}
+    return response.content[0].text
 
 
 # -------- STEP 2: SCORING --------
-def get_candidate_score(jd_text, data):
+def get_candidate_score(jd_text, resume_text, education_info):
     prompt = f"""
 You are an expert recruiter.
 
 Job Description:
 {jd_text}
 
-Candidate Data:
-{data}
+Candidate Resume:
+{resume_text}
 
-Evaluate the candidate.
+Detected Education:
+{education_info}
 
 IMPORTANT:
-- If structured data is weak, infer from available info
-- NEVER say "no candidate info"
+- TRUST inferred education above missing text
+- DO NOT assume "no MBA" if inferred MBA exists
+
+Evaluate candidate.
 
 Return ONLY:
 
@@ -194,11 +183,16 @@ if analyze_clicked:
             for file in resume_files:
                 resume_text = extract_text(file)[:3000]
 
-                # STEP 1: Extract profile (safe)
-                profile = extract_candidate_profile(resume_text)
+                # STEP 1: Education reasoning
+                education_info = detect_education(resume_text)
 
-                # STEP 2: Score (with fallback)
-                analysis = get_candidate_score(jd_text[:2000], profile)
+                # STEP 2: Scoring
+                analysis = get_candidate_score(
+                    jd_text[:2000],
+                    resume_text,
+                    education_info
+                )
+
                 score = extract_score(analysis)
 
                 results.append({
