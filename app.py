@@ -36,27 +36,30 @@ def extract_score(text):
         return 0
 
 
+# -------- SAFE JSON PARSER --------
+def safe_json_load(raw_text):
+    try:
+        start = raw_text.find("{")
+        end = raw_text.rfind("}") + 1
+        json_str = raw_text[start:end]
+        return json.loads(json_str)
+    except:
+        return None
+
+
 # -------- STEP 1: PROFILE EXTRACTION --------
 def extract_candidate_profile(resume_text):
     prompt = f"""
-You are an expert resume parser.
+Extract structured candidate data from this resume.
 
-Extract structured candidate data.
+Return ONLY JSON.
 
 Resume:
 {resume_text}
 
-Return ONLY valid JSON:
-
+Format:
 {{
-  "education": [
-    {{
-      "degree": "",
-      "institute": "",
-      "inferred_degree": "",
-      "confidence": ""
-    }}
-  ],
+  "education": [],
   "current_status": "",
   "skills": [],
   "experience_years": "",
@@ -65,10 +68,8 @@ Return ONLY valid JSON:
 }}
 
 IMPORTANT:
-- If degree is missing, infer it using:
-  - email domains
-  - institute names (IIM → MBA, IIT → Engineer)
-  - context clues
+- Infer missing info using context (email, institute, etc.)
+- Do NOT return anything except JSON
 """
 
     response = client.messages.create(
@@ -77,24 +78,31 @@ IMPORTANT:
         messages=[{"role": "user", "content": prompt}]
     )
 
-    try:
-        return json.loads(response.content[0].text)
-    except:
-        return {"error": "Parsing failed"}
+    raw_output = response.content[0].text
+    parsed = safe_json_load(raw_output)
+
+    if parsed:
+        return parsed
+    else:
+        return {"fallback": resume_text}
 
 
 # -------- STEP 2: SCORING --------
-def get_candidate_score(jd_text, profile):
+def get_candidate_score(jd_text, data):
     prompt = f"""
 You are an expert recruiter.
 
 Job Description:
 {jd_text}
 
-Candidate Profile:
-{profile}
+Candidate Data:
+{data}
 
 Evaluate the candidate.
+
+IMPORTANT:
+- If structured data is weak, infer from available info
+- NEVER say "no candidate info"
 
 Return ONLY:
 
@@ -126,7 +134,10 @@ def generate_report(top_candidates):
     doc.add_heading('Top Candidates Report', 0)
 
     for i, candidate in enumerate(top_candidates, 1):
-        doc.add_heading(f"{i}. {candidate['name']} (Score: {candidate['score']})", level=2)
+        doc.add_heading(
+            f"{i}. {candidate['name']} (Score: {candidate['score']})",
+            level=2
+        )
         doc.add_paragraph(candidate["analysis"])
 
     buffer = BytesIO()
@@ -183,10 +194,10 @@ if analyze_clicked:
             for file in resume_files:
                 resume_text = extract_text(file)[:3000]
 
-                # STEP 1: Extract profile
+                # STEP 1: Extract profile (safe)
                 profile = extract_candidate_profile(resume_text)
 
-                # STEP 2: Score
+                # STEP 2: Score (with fallback)
                 analysis = get_candidate_score(jd_text[:2000], profile)
                 score = extract_score(analysis)
 
