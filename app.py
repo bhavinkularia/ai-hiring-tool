@@ -127,43 +127,34 @@ top_n = st.slider(
 analyze_clicked = st.button("🔍 Analyze Candidates")
 
 
-# -------- AI ANALYSIS + RANKING --------
+# -------- AI ANALYSIS (NO DISPLAY) --------
 if analyze_clicked:
     if not jd_text or not resume_files:
         st.warning("⚠️ Please upload both Job Description and Resumes")
     else:
-        st.subheader(f"🏆 Top {top_n} Candidates")
+        with st.spinner("Analyzing candidates..."):
+            results = []
 
-        results = []
+            for file in resume_files:
+                resume_text = extract_text(file)
+                resume_text = resume_text[:3000]
 
-        for file in resume_files:
-            resume_text = extract_text(file)
-            resume_text = resume_text[:3000]
-
-            with st.spinner(f"Analyzing {file.name}..."):
                 analysis = get_candidate_score(jd_text[:2000], resume_text)
+                score = extract_score(analysis)
 
-            score = extract_score(analysis)
+                results.append({
+                    "name": file.name,
+                    "score": score,
+                    "analysis": analysis
+                })
 
-            results.append({
-                "name": file.name,
-                "score": score,
-                "analysis": analysis
-            })
+            # Sort + select top N
+            sorted_results = sorted(results, key=lambda x: x["score"], reverse=True)
+            top_candidates = sorted_results[:top_n]
 
-        # Sort candidates
-        sorted_results = sorted(results, key=lambda x: x["score"], reverse=True)
+        st.success("✅ Analysis complete")
 
-        # Top N
-        top_candidates = sorted_results[:top_n]
-
-        # Display results
-        for i, candidate in enumerate(top_candidates, 1):
-            st.write(f"### {i}. {candidate['name']} (Score: {candidate['score']})")
-            st.text(candidate["analysis"])
-            st.divider()
-
-        # -------- DOWNLOAD REPORT --------
+        # -------- DOWNLOAD ONLY --------
         report_file = generate_report(top_candidates)
 
         st.download_button(
