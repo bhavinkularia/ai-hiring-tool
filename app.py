@@ -76,7 +76,7 @@ Gaps:
     return response.content[0].text
 
 
-# -------- REPORT GENERATION (FIXED) --------
+# -------- REPORT GENERATION --------
 def generate_report(top_candidates):
     doc = Document()
     doc.add_heading('Top Candidates Report', 0)
@@ -101,8 +101,7 @@ jd_file = st.file_uploader(
 jd_text = ""
 if jd_file:
     jd_text = extract_text(jd_file)
-    st.subheader("Job Description Extracted")
-    st.text(jd_text[:1000])
+    st.success("✅ Job Description uploaded")
 
 
 # -------- RESUME UPLOAD --------
@@ -112,15 +111,8 @@ resume_files = st.file_uploader(
     accept_multiple_files=True
 )
 
-# Preview resumes
 if resume_files:
-    st.subheader("Resume Preview")
-
-    for file in resume_files:
-        st.write(f"### {file.name}")
-        resume_text = extract_text(file)
-        st.text(resume_text[:500])
-        st.divider()
+    st.success(f"✅ {len(resume_files)} resumes uploaded")
 
 
 # -------- TOP N SELECTOR --------
@@ -165,7 +157,7 @@ if analyze_clicked:
         # Top N
         top_candidates = sorted_results[:top_n]
 
-        # Display
+        # Display results
         for i, candidate in enumerate(top_candidates, 1):
             st.write(f"### {i}. {candidate['name']} (Score: {candidate['score']})")
             st.text(candidate["analysis"])
