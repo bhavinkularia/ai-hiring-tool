@@ -4,6 +4,7 @@ import pdfplumber
 import anthropic
 import os
 from io import BytesIO
+import json
 
 # -------- CONFIG --------
 client = anthropic.Anthropic(
@@ -35,25 +36,70 @@ def extract_score(text):
         return 0
 
 
-# -------- CLAUDE SCORING --------
-def get_candidate_score(jd_text, resume_text):
+# -------- STEP 1: PROFILE EXTRACTION --------
+def extract_candidate_profile(resume_text):
     prompt = f"""
-You are an expert HR recruiter.
+You are an expert resume parser.
+
+Extract structured candidate data.
+
+Resume:
+{resume_text}
+
+Return ONLY valid JSON:
+
+{{
+  "education": [
+    {{
+      "degree": "",
+      "institute": "",
+      "inferred_degree": "",
+      "confidence": ""
+    }}
+  ],
+  "current_status": "",
+  "skills": [],
+  "experience_years": "",
+  "domain": "",
+  "inferences": []
+}}
+
+IMPORTANT:
+- If degree is missing, infer it using:
+  - email domains
+  - institute names (IIM → MBA, IIT → Engineer)
+  - context clues
+"""
+
+    response = client.messages.create(
+        model="claude-sonnet-4-0",
+        max_tokens=500,
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    try:
+        return json.loads(response.content[0].text)
+    except:
+        return {"error": "Parsing failed"}
+
+
+# -------- STEP 2: SCORING --------
+def get_candidate_score(jd_text, profile):
+    prompt = f"""
+You are an expert recruiter.
 
 Job Description:
 {jd_text}
 
-Candidate Resume:
-{resume_text}
+Candidate Profile:
+{profile}
 
-Evaluate the candidate and return:
-1. Match Score (0-100)
-2. Top 3 strengths
-3. Top 3 gaps
+Evaluate the candidate.
 
-Respond ONLY in this format:
+Return ONLY:
 
 Score: <number>
+
 Strengths:
 - ...
 - ...
@@ -68,9 +114,7 @@ Gaps:
     response = client.messages.create(
         model="claude-sonnet-4-0",
         max_tokens=500,
-        messages=[
-            {"role": "user", "content": prompt}
-        ]
+        messages=[{"role": "user", "content": prompt}]
     )
 
     return response.content[0].text
@@ -123,11 +167,12 @@ top_n = st.slider(
     value=3
 )
 
+
 # -------- ANALYZE BUTTON --------
 analyze_clicked = st.button("🔍 Analyze Candidates")
 
 
-# -------- AI ANALYSIS (NO DISPLAY) --------
+# -------- AI PIPELINE --------
 if analyze_clicked:
     if not jd_text or not resume_files:
         st.warning("⚠️ Please upload both Job Description and Resumes")
@@ -136,10 +181,13 @@ if analyze_clicked:
             results = []
 
             for file in resume_files:
-                resume_text = extract_text(file)
-                resume_text = resume_text[:3000]
+                resume_text = extract_text(file)[:3000]
 
-                analysis = get_candidate_score(jd_text[:2000], resume_text)
+                # STEP 1: Extract profile
+                profile = extract_candidate_profile(resume_text)
+
+                # STEP 2: Score
+                analysis = get_candidate_score(jd_text[:2000], profile)
                 score = extract_score(analysis)
 
                 results.append({
