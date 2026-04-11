@@ -33,17 +33,7 @@ def safe_json_load(text):
         end = text.rfind("}") + 1
         return json.loads(text[start:end])
     except:
-        return None
-
-
-# -------- SCORE EXTRACTION --------
-def extract_score(text):
-    try:
-        for line in text.split("\n"):
-            if "Score" in line:
-                return int(line.split(":")[1].replace("%", "").strip())
-    except:
-        return 0
+        return {}
 
 
 # -------- STEP 1: PROFILE EXTRACTION --------
@@ -57,14 +47,15 @@ Resume:
 Return ONLY JSON:
 
 {{
+  "name": "",
   "education": [],
   "skills": [],
-  "experience_years": "",
-  "confidence": "High/Medium/Low"
+  "experience_years": ""
 }}
 
 IMPORTANT:
 - Infer missing info if possible
+- Keep education ordered from highest to lowest
 """
 
     response = client.messages.create(
@@ -74,11 +65,7 @@ IMPORTANT:
     )
 
     parsed = safe_json_load(response.content[0].text)
-
-    if parsed:
-        return parsed, False  # no issue
-    else:
-        return {"raw": resume_text}, True  # parsing issue
+    return parsed
 
 
 # -------- STEP 2: SCORING --------
@@ -92,23 +79,17 @@ Job Description:
 Candidate Profile:
 {profile}
 
-Evaluate how well candidate matches JD.
+Return ONLY JSON:
 
-Return ONLY:
+{{
+  "score": 0-100,
+  "strengths": ["", "", ""],
+  "gaps": ["", "", ""]
+}}
 
-Score: <percentage between 0-100>
-
-Confidence: <High/Medium/Low>
-
-Strengths:
-- ...
-- ...
-- ...
-
-Gaps:
-- ...
-- ...
-- ...
+RULES:
+- Keep strengths and gaps concise (max 6-8 words each)
+- Focus on hiring relevance only
 """
 
     response = client.messages.create(
@@ -117,21 +98,15 @@ Gaps:
         messages=[{"role": "user", "content": prompt}]
     )
 
-    return response.content[0].text
+    parsed = safe_json_load(response.content[0].text)
+    return parsed
 
 
-# -------- REVIEW FLAG --------
-def get_review_flag(profile_issue, analysis_text):
-    if profile_issue:
-        return "YES (Parsing Issue)"
-
-    if "Confidence: Low" in analysis_text:
-        return "YES (Low Confidence)"
-
-    if "not enough information" in analysis_text.lower():
-        return "YES (Incomplete Data)"
-
-    return "NO"
+# -------- HELPER --------
+def get_highest_education(education_list):
+    if not education_list:
+        return "N/A"
+    return education_list[0]
 
 
 # -------- REPORT GENERATION --------
@@ -140,11 +115,38 @@ def generate_report(top_candidates):
     doc.add_heading('Top Candidates Report', 0)
 
     for i, candidate in enumerate(top_candidates, 1):
-        doc.add_heading(
-            f"{i}. {candidate['name']} | Match: {candidate['score']}% | Review: {candidate['review']}",
-            level=2
+
+        # -------- HEADER --------
+        doc.add_paragraph(
+            f"{i}. {candidate['file_name']} | Match: {candidate['score']}%"
         )
-        doc.add_paragraph(candidate["analysis"])
+
+        # -------- BASIC INFO --------
+        doc.add_paragraph(
+            f"Experience: {candidate['experience']} | "
+            f"Education: {get_highest_education(candidate['education'])}"
+        )
+
+        # -------- TABLE --------
+        table = doc.add_table(rows=1, cols=2)
+        table.style = 'Table Grid'
+
+        hdr_cells = table.rows[0].cells
+        hdr_cells[0].text = "Strengths"
+        hdr_cells[1].text = "Gaps"
+
+        strengths = candidate['strengths']
+        gaps = candidate['gaps']
+
+        max_len = max(len(strengths), len(gaps))
+
+        for j in range(max_len):
+            row_cells = table.add_row().cells
+
+            row_cells[0].text = strengths[j] if j < len(strengths) else ""
+            row_cells[1].text = gaps[j] if j < len(gaps) else ""
+
+        doc.add_paragraph("")  # spacing
 
     buffer = BytesIO()
     doc.save(buffer)
@@ -199,30 +201,31 @@ if analyze_clicked:
             for file in resume_files:
                 resume_text = extract_text(file)[:3000]
 
-                # Step 1
-                profile, profile_issue = extract_candidate_profile(resume_text)
+                # Step 1: Profile extraction
+                profile = extract_candidate_profile(resume_text)
 
-                # Step 2
-                analysis = get_candidate_score(jd_text[:2000], profile)
+                # Step 2: Scoring
+                analysis_json = get_candidate_score(jd_text[:2000], profile)
 
-                score = extract_score(analysis)
-
-                # Step 3: Review flag
-                review_flag = get_review_flag(profile_issue, analysis)
+                score = analysis_json.get("score", 0)
+                strengths = analysis_json.get("strengths", [])
+                gaps = analysis_json.get("gaps", [])
 
                 results.append({
-                    "name": file.name,
+                    "file_name": file.name,
                     "score": score,
-                    "analysis": analysis,
-                    "review": review_flag
+                    "strengths": strengths,
+                    "gaps": gaps,
+                    "experience": profile.get("experience_years", "N/A"),
+                    "education": profile.get("education", [])
                 })
 
-            # Sort
+            # Sort candidates
             sorted_results = sorted(results, key=lambda x: x["score"], reverse=True)
 
-            # Buffer shortlist (VERY IMPORTANT)
-            buffer = int(top_n * 2.5)
-            top_candidates = sorted_results[:buffer]
+            # Buffer shortlist
+            buffer_n = int(top_n * 2.5)
+            top_candidates = sorted_results[:buffer_n]
 
         st.success("✅ Analysis complete")
 
