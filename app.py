@@ -11,7 +11,7 @@ client = anthropic.Anthropic(
     api_key=os.getenv("ANTHROPIC_API_KEY")
 )
 
-st.title("AI Screener Assistant")
+st.title("AI Hiring Assistant")
 
 # -------- TEXT EXTRACTION --------
 def extract_text(file):
@@ -26,7 +26,7 @@ def extract_text(file):
         return "\n".join([para.text for para in doc.paragraphs])
 
 
-# -------- SAFE JSON --------
+# -------- SAFE JSON PARSER --------
 def safe_json_load(text):
     try:
         start = text.find("{")
@@ -43,39 +43,28 @@ def extract_candidate_name(file_name):
     return name
 
 
-# -------- EDUCATION FORMAT --------
+# -------- EDUCATION FORMATTER --------
 def format_education(education_list):
     if not education_list:
         return "N/A"
-    return str(education_list[0])
 
+    edu = education_list[0]
 
-# -------- JD SUMMARY (LOW TOKEN, HIGH IMPACT) --------
-def extract_jd_summary(jd_text):
-    prompt = f"""
-Summarize JD into hiring signals.
+    if isinstance(edu, dict):
+        degree = edu.get("degree", "")
+        college = edu.get("institution", "")
+        year = edu.get("year", "")
+        grade = edu.get("grade", "")
 
-Return JSON:
+        parts = [degree, college, year]
+        base = ", ".join([p for p in parts if p])
 
-{{
-  "core_requirements": [],
-  "tools": [],
-  "compliance": [],
-  "experience_range": ""
-}}
+        if grade:
+            base += f", Grade: {grade}"
 
-Max 5 items each. Keep concise.
+        return base
 
-JD:
-{jd_text}
-"""
-    response = client.messages.create(
-        model="claude-sonnet-4-0",
-        max_tokens=200,
-        messages=[{"role": "user", "content": prompt}]
-    )
-
-    return safe_json_load(response.content[0].text)
+    return str(edu)
 
 
 # -------- PROFILE EXTRACTION --------
@@ -89,64 +78,63 @@ Resume:
 Return ONLY JSON:
 
 {{
+  "name": "",
   "education": [],
   "skills": [],
   "experience_years": ""
 }}
 
-Keep it concise.
+IMPORTANT:
+- Infer missing info
+- Keep education ordered highest first
 """
+
     response = client.messages.create(
         model="claude-sonnet-4-0",
-        max_tokens=300,
+        max_tokens=400,
         messages=[{"role": "user", "content": prompt}]
     )
 
     return safe_json_load(response.content[0].text)
 
 
-# -------- SMART SCORING --------
-def get_candidate_score(jd_summary, profile):
+# -------- SCORING --------
+def get_candidate_score(jd_text, profile):
     prompt = f"""
-You are a hiring manager selecting the best candidate.
+You are an expert recruiter.
 
-Job Requirements:
-{jd_summary}
+Job Description:
+{jd_text}
 
-Candidate:
+Candidate Profile:
 {profile}
 
-Evaluate in 3 steps:
-
-1. Fit Check (meets requirement or not)
-2. Strength Analysis (what stands out)
-3. Gap Analysis (ONLY meaningful gaps)
-
-IMPORTANT:
-- Avoid generic gaps
-- Do NOT repeat same gaps for all candidates
-- If requirement is met → do NOT call it a gap
-- Prefer relative insights (e.g., "limited depth", "basic exposure")
-- Think like you must choose ONE best candidate
-
-Return JSON:
+Return ONLY JSON:
 
 {{
   "score": 0-100,
   "strengths": [],
   "gaps": []
 }}
+
+RULES:
+- 1 to 3 strengths MAX (only if meaningful)
+- 1 to 3 gaps MAX (only if real gaps exist)
+- Avoid duplication
+- Each point ≤ 10 words
+- No filler content
 """
+
     response = client.messages.create(
         model="claude-sonnet-4-0",
-        max_tokens=300,
+        max_tokens=400,
         messages=[{"role": "user", "content": prompt}]
     )
 
     return safe_json_load(response.content[0].text)
 
 
-# -------- REPORT --------
+# -------- REPORT GENERATION --------
 def generate_report(top_candidates):
     doc = Document()
     doc.add_heading('Top Candidates Report', 0)
@@ -155,36 +143,37 @@ def generate_report(top_candidates):
 
         name = extract_candidate_name(candidate['file_name'])
 
-        # Title
+        # -------- TITLE --------
         p = doc.add_paragraph()
         run = p.add_run(f"{i}. {name} | Match: {candidate['score']}%")
         run.bold = True
 
-        # File name
+        # -------- FILE NAME --------
         doc.add_paragraph(f"File Name : {candidate['file_name']}")
 
-        # Info
+        # -------- EXPERIENCE + EDUCATION --------
         doc.add_paragraph(
             f"Experience: {candidate['experience']} years | "
             f"Education: {format_education(candidate['education'])}"
         )
 
-        # Table
+        # -------- TABLE --------
         table = doc.add_table(rows=1, cols=2)
         table.style = 'Table Grid'
 
-        table.rows[0].cells[0].text = "Strengths"
-        table.rows[0].cells[1].text = "Gaps"
+        hdr_cells = table.rows[0].cells
+        hdr_cells[0].text = "Strengths"
+        hdr_cells[1].text = "Gaps"
 
-        strengths = candidate.get("strengths", [])
-        gaps = candidate.get("gaps", [])
+        strengths = candidate.get('strengths', [])
+        gaps = candidate.get('gaps', [])
 
         max_len = max(len(strengths), len(gaps), 1)
 
         for j in range(max_len):
-            row = table.add_row().cells
-            row[0].text = strengths[j] if j < len(strengths) else ""
-            row[1].text = gaps[j] if j < len(gaps) else ""
+            row_cells = table.add_row().cells
+            row_cells[0].text = strengths[j] if j < len(strengths) else ""
+            row_cells[1].text = gaps[j] if j < len(gaps) else ""
 
         doc.add_paragraph("")
 
@@ -195,31 +184,54 @@ def generate_report(top_candidates):
     return buffer
 
 
-# -------- UI --------
-jd_file = st.file_uploader("Upload JD", type=["pdf", "docx"])
-resume_files = st.file_uploader("Upload Resumes", type=["pdf", "docx"], accept_multiple_files=True)
+# -------- JD UPLOAD --------
+jd_file = st.file_uploader(
+    "Upload Job Description (PDF or DOCX)",
+    type=["pdf", "docx"]
+)
 
-top_n = st.slider("Top Candidates", 1, 20, 3)
-analyze_clicked = st.button("Analyze")
+jd_text = ""
+if jd_file:
+    jd_text = extract_text(jd_file)
+    st.success("✅ Job Description uploaded")
+
+
+# -------- RESUME UPLOAD --------
+resume_files = st.file_uploader(
+    "Upload Resumes (PDF or DOCX)",
+    type=["pdf", "docx"],
+    accept_multiple_files=True
+)
+
+if resume_files:
+    st.success(f"✅ {len(resume_files)} resumes uploaded")
+
+
+# -------- TOP N SELECTOR --------
+top_n = st.slider(
+    "Select number of top candidates",
+    min_value=1,
+    max_value=20,
+    value=3
+)
+
+# -------- ANALYZE BUTTON --------
+analyze_clicked = st.button("🔍 Analyze Candidates")
 
 
 # -------- PIPELINE --------
 if analyze_clicked:
-    if not jd_file or not resume_files:
-        st.warning("Upload JD and resumes")
+    if not jd_text or not resume_files:
+        st.warning("⚠️ Please upload both Job Description and Resumes")
     else:
-        with st.spinner("Analyzing..."):
-
-            jd_text = extract_text(jd_file)
-            jd_summary = extract_jd_summary(jd_text)
-
+        with st.spinner("Analyzing candidates..."):
             results = []
 
             for file in resume_files:
-                resume_text = extract_text(file)[:2500]
+                resume_text = extract_text(file)[:3000]
 
                 profile = extract_candidate_profile(resume_text)
-                analysis = get_candidate_score(jd_summary, profile)
+                analysis = get_candidate_score(jd_text[:2000], profile)
 
                 results.append({
                     "file_name": file.name,
@@ -230,17 +242,18 @@ if analyze_clicked:
                     "education": profile.get("education", [])
                 })
 
-            # Stable ranking (no LLM failure)
             sorted_results = sorted(results, key=lambda x: x["score"], reverse=True)
 
-            top_candidates = sorted_results[:top_n]
+            buffer_n = int(top_n * 2.5)
+            top_candidates = sorted_results[:buffer_n]
 
-        st.success("Analysis complete")
+        st.success("✅ Analysis complete")
 
-        report = generate_report(top_candidates)
+        report_file = generate_report(top_candidates)
 
         st.download_button(
-            "Download Report",
-            report,
-            "Top_Candidates_Report.docx"
+            label="📄 Download Report",
+            data=report_file,
+            file_name="Top_Candidates_Report.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         )
