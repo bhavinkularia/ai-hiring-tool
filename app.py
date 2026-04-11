@@ -36,7 +36,38 @@ def safe_json_load(text):
         return {}
 
 
-# -------- STEP 1: PROFILE EXTRACTION --------
+# -------- NAME CLEANER --------
+def extract_candidate_name(file_name):
+    name = file_name.replace(".pdf", "").replace(".docx", "")
+    name = name.replace("Resume", "").replace("_", " ").strip()
+    return name
+
+
+# -------- EDUCATION FORMATTER --------
+def format_education(education_list):
+    if not education_list:
+        return "N/A"
+
+    edu = education_list[0]
+
+    if isinstance(edu, dict):
+        degree = edu.get("degree", "")
+        college = edu.get("institution", "")
+        year = edu.get("year", "")
+        grade = edu.get("grade", "")
+
+        parts = [degree, college, year]
+        base = ", ".join([p for p in parts if p])
+
+        if grade:
+            base += f", Grade: {grade}"
+
+        return base
+
+    return str(edu)
+
+
+# -------- PROFILE EXTRACTION --------
 def extract_candidate_profile(resume_text):
     prompt = f"""
 Extract structured candidate data.
@@ -54,8 +85,8 @@ Return ONLY JSON:
 }}
 
 IMPORTANT:
-- Infer missing info if possible
-- Keep education ordered from highest to lowest
+- Infer missing info
+- Keep education ordered highest first
 """
 
     response = client.messages.create(
@@ -64,11 +95,10 @@ IMPORTANT:
         messages=[{"role": "user", "content": prompt}]
     )
 
-    parsed = safe_json_load(response.content[0].text)
-    return parsed
+    return safe_json_load(response.content[0].text)
 
 
-# -------- STEP 2: SCORING --------
+# -------- SCORING --------
 def get_candidate_score(jd_text, profile):
     prompt = f"""
 You are an expert recruiter.
@@ -83,30 +113,25 @@ Return ONLY JSON:
 
 {{
   "score": 0-100,
-  "strengths": ["", "", ""],
-  "gaps": ["", "", ""]
+  "strengths": [],
+  "gaps": []
 }}
 
 RULES:
-- Keep strengths and gaps concise (max 6-8 words each)
-- Focus on hiring relevance only
+- 1 to 3 strengths MAX (only if meaningful)
+- 1 to 3 gaps MAX (only if real gaps exist)
+- Avoid duplication
+- Each point ≤ 10 words
+- No filler content
 """
 
     response = client.messages.create(
         model="claude-sonnet-4-0",
-        max_tokens=500,
+        max_tokens=400,
         messages=[{"role": "user", "content": prompt}]
     )
 
-    parsed = safe_json_load(response.content[0].text)
-    return parsed
-
-
-# -------- HELPER --------
-def get_highest_education(education_list):
-    if not education_list:
-        return "N/A"
-    return education_list[0]
+    return safe_json_load(response.content[0].text)
 
 
 # -------- REPORT GENERATION --------
@@ -116,15 +141,20 @@ def generate_report(top_candidates):
 
     for i, candidate in enumerate(top_candidates, 1):
 
-        # -------- HEADER --------
-        doc.add_paragraph(
-            f"{i}. {candidate['file_name']} | Match: {candidate['score']}%"
-        )
+        name = extract_candidate_name(candidate['file_name'])
 
-        # -------- BASIC INFO --------
+        # -------- TITLE --------
+        p = doc.add_paragraph()
+        run = p.add_run(f"{i}. {name} | Match: {candidate['score']}%")
+        run.bold = True
+
+        # -------- FILE NAME --------
+        doc.add_paragraph(f"File Name : {candidate['file_name']}")
+
+        # -------- EXPERIENCE + EDUCATION --------
         doc.add_paragraph(
-            f"Experience: {candidate['experience']} | "
-            f"Education: {get_highest_education(candidate['education'])}"
+            f"Experience: {candidate['experience']} years | "
+            f"Education: {format_education(candidate['education'])}"
         )
 
         # -------- TABLE --------
@@ -135,18 +165,17 @@ def generate_report(top_candidates):
         hdr_cells[0].text = "Strengths"
         hdr_cells[1].text = "Gaps"
 
-        strengths = candidate['strengths']
-        gaps = candidate['gaps']
+        strengths = candidate.get('strengths', [])
+        gaps = candidate.get('gaps', [])
 
-        max_len = max(len(strengths), len(gaps))
+        max_len = max(len(strengths), len(gaps), 1)
 
         for j in range(max_len):
             row_cells = table.add_row().cells
-
             row_cells[0].text = strengths[j] if j < len(strengths) else ""
             row_cells[1].text = gaps[j] if j < len(gaps) else ""
 
-        doc.add_paragraph("")  # spacing
+        doc.add_paragraph("")
 
     buffer = BytesIO()
     doc.save(buffer)
@@ -190,7 +219,7 @@ top_n = st.slider(
 analyze_clicked = st.button("🔍 Analyze Candidates")
 
 
-# -------- AI PIPELINE --------
+# -------- PIPELINE --------
 if analyze_clicked:
     if not jd_text or not resume_files:
         st.warning("⚠️ Please upload both Job Description and Resumes")
@@ -201,35 +230,25 @@ if analyze_clicked:
             for file in resume_files:
                 resume_text = extract_text(file)[:3000]
 
-                # Step 1: Profile extraction
                 profile = extract_candidate_profile(resume_text)
-
-                # Step 2: Scoring
-                analysis_json = get_candidate_score(jd_text[:2000], profile)
-
-                score = analysis_json.get("score", 0)
-                strengths = analysis_json.get("strengths", [])
-                gaps = analysis_json.get("gaps", [])
+                analysis = get_candidate_score(jd_text[:2000], profile)
 
                 results.append({
                     "file_name": file.name,
-                    "score": score,
-                    "strengths": strengths,
-                    "gaps": gaps,
+                    "score": analysis.get("score", 0),
+                    "strengths": analysis.get("strengths", []),
+                    "gaps": analysis.get("gaps", []),
                     "experience": profile.get("experience_years", "N/A"),
                     "education": profile.get("education", [])
                 })
 
-            # Sort candidates
             sorted_results = sorted(results, key=lambda x: x["score"], reverse=True)
 
-            # Buffer shortlist
             buffer_n = int(top_n * 2.5)
             top_candidates = sorted_results[:buffer_n]
 
         st.success("✅ Analysis complete")
 
-        # -------- DOWNLOAD --------
         report_file = generate_report(top_candidates)
 
         st.download_button(
