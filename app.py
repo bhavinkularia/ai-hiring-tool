@@ -5,6 +5,8 @@ import anthropic
 import os
 from io import BytesIO
 import json
+from docx.shared import Pt
+from docx.enum.text import WD_COLOR_INDEX
 
 # -------- CONFIG --------
 client = anthropic.Anthropic(
@@ -83,10 +85,6 @@ Return ONLY JSON:
   "skills": [],
   "experience_years": ""
 }}
-
-IMPORTANT:
-- Infer missing info
-- Keep education ordered highest first
 """
 
     response = client.messages.create(
@@ -118,11 +116,10 @@ Return ONLY JSON:
 }}
 
 RULES:
-- 1 to 3 strengths MAX (only if meaningful)
-- 1 to 3 gaps MAX (only if real gaps exist)
+- 1 to 3 strengths MAX
+- 1 to 3 gaps MAX
 - Avoid duplication
 - Each point ≤ 10 words
-- No filler content
 """
 
     response = client.messages.create(
@@ -143,10 +140,17 @@ def generate_report(top_candidates):
 
         name = extract_candidate_name(candidate['file_name'])
 
-        # -------- TITLE --------
+        # -------- TITLE (WITH FORMATTING) --------
         p = doc.add_paragraph()
-        run = p.add_run(f"{i}. {name} | Match: {candidate['score']}%")
-        run.bold = True
+
+        run1 = p.add_run(f"{i}. {name} | ")
+        run1.bold = True
+        run1.font.size = Pt(14)
+
+        run2 = p.add_run(f"Match: {candidate['score']}%")
+        run2.bold = True
+        run2.font.size = Pt(14)
+        run2.font.highlight_color = WD_COLOR_INDEX.YELLOW
 
         # -------- FILE NAME --------
         doc.add_paragraph(f"File Name : {candidate['file_name']}")
