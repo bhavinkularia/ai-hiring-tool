@@ -67,7 +67,7 @@ def format_education(education_list):
     return str(edu)
 
 
-# -------- PROFILE EXTRACTION (UNCHANGED - AI BASED) --------
+# -------- PROFILE EXTRACTION --------
 def extract_candidate_profile(resume_text):
     prompt = f"""
 Extract structured candidate data.
@@ -98,66 +98,40 @@ IMPORTANT:
     return safe_json_load(response.content[0].text)
 
 
-# -------- RULE-BASED SCORING (FIXED) --------
+# -------- SCORING --------
 def get_candidate_score(jd_text, profile):
-    jd_text = jd_text.lower()
+    prompt = f"""
+You are an expert recruiter.
 
-    skills = [s.lower() for s in profile.get("skills", [])]
-    experience = profile.get("experience_years", "")
+Job Description:
+{jd_text}
 
-    # -------- SKILL MATCH --------
-    matched_skills = [s for s in skills if s in jd_text]
-    skill_score = min(len(matched_skills) * 10, 50)
+Candidate Profile:
+{profile}
 
-    # -------- EXPERIENCE MATCH --------
-    exp_score = 0
-    try:
-        exp_num = float(''.join(filter(str.isdigit, str(experience))))
-        if exp_num >= 5:
-            exp_score = 30
-        elif exp_num >= 2:
-            exp_score = 20
-        elif exp_num > 0:
-            exp_score = 10
-    except:
-        exp_score = 0
+Return ONLY JSON:
 
-    # -------- EDUCATION MATCH --------
-    education = profile.get("education", [])
-    edu_score = 0
+{{
+  "score": 0-100,
+  "strengths": [],
+  "gaps": []
+}}
 
-    if education:
-        edu_text = str(education[0]).lower()
-        if any(x in edu_text for x in ["btech", "be", "mtech", "mba"]):
-            edu_score = 20
+RULES:
+- 1 to 3 strengths MAX (only if meaningful)
+- 1 to 3 gaps MAX (only if real gaps exist)
+- Avoid duplication
+- Each point ≤ 10 words
+- No filler content
+"""
 
-    # -------- FINAL SCORE --------
-    total_score = skill_score + exp_score + edu_score
-    total_score = min(total_score, 100)
+    response = client.messages.create(
+        model="claude-sonnet-4-0",
+        max_tokens=400,
+        messages=[{"role": "user", "content": prompt}]
+    )
 
-    # -------- STRENGTHS --------
-    strengths = []
-    if matched_skills:
-        strengths.append(f"{len(matched_skills)} relevant skills match")
-    if exp_score >= 20:
-        strengths.append("Strong relevant experience")
-    if edu_score:
-        strengths.append("Relevant education background")
-
-    # -------- GAPS --------
-    gaps = []
-    if not matched_skills:
-        gaps.append("No matching skills found")
-    if exp_score < 20:
-        gaps.append("Low experience")
-    if not edu_score:
-        gaps.append("Education mismatch")
-
-    return {
-        "score": total_score,
-        "strengths": strengths[:3],
-        "gaps": gaps[:3]
-    }
+    return safe_json_load(response.content[0].text)
 
 
 # -------- REPORT GENERATION --------
