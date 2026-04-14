@@ -5,6 +5,7 @@ import anthropic
 import os
 from io import BytesIO
 import json
+import re
 
 # -------- CONFIG --------
 client = anthropic.Anthropic(
@@ -26,16 +27,6 @@ def extract_text(file):
         return "\n".join([para.text for para in doc.paragraphs])
 
 
-# -------- SAFE JSON PARSER --------
-def safe_json_load(text):
-    try:
-        start = text.find("{")
-        end = text.rfind("}") + 1
-        return json.loads(text[start:end])
-    except:
-        return {}
-
-
 # -------- NAME CLEANER --------
 def extract_candidate_name(file_name):
     name = file_name.replace(".pdf", "").replace(".docx", "")
@@ -43,98 +34,109 @@ def extract_candidate_name(file_name):
     return name
 
 
-# -------- EDUCATION FORMATTER --------
-def format_education(education_list):
-    if not education_list:
-        return "N/A"
-
-    edu = education_list[0]
-
-    if isinstance(edu, dict):
-        degree = edu.get("degree", "")
-        college = edu.get("institution", "")
-        year = edu.get("year", "")
-        grade = edu.get("grade", "")
-
-        parts = [degree, college, year]
-        base = ", ".join([p for p in parts if p])
-
-        if grade:
-            base += f", Grade: {grade}"
-
-        return base
-
-    return str(edu)
+# -------- RULE: EXPERIENCE --------
+def extract_experience(text):
+    matches = re.findall(r'(\d+\.?\d*)\s*(years|year|yrs)', text.lower())
+    if matches:
+        return max([float(m[0]) for m in matches])
+    return 0
 
 
-# -------- PROFILE EXTRACTION --------
-def extract_candidate_profile(resume_text):
+# -------- RULE: EDUCATION --------
+def extract_education(text):
+    degrees = ["m.com", "mba", "b.com", "bba", "b.sc", "m.sc"]
+    for d in degrees:
+        if d in text.lower():
+            return [d.upper()]
+    return ["N/A"]
+
+
+# -------- RULE: JD REQUIREMENTS --------
+def extract_jd_rules(jd_text):
+    exp_match = re.findall(r'(\d+)\s*[-–]\s*(\d+)\s*years', jd_text.lower())
+    if exp_match:
+        min_exp = int(exp_match[0][0])
+        max_exp = int(exp_match[0][1])
+    else:
+        min_exp, max_exp = 0, 10
+
+    keywords = ["tally", "gst", "tds", "excel", "accounting"]
+    return {
+        "min_exp": min_exp,
+        "max_exp": max_exp,
+        "keywords": keywords
+    }
+
+
+# -------- RULE: MATCH SCORE --------
+def calculate_score(profile_text, jd_rules, experience):
+    score = 0
+
+    # Experience (40)
+    if experience >= jd_rules["min_exp"]:
+        score += 40
+    else:
+        score += int((experience / jd_rules["min_exp"]) * 40) if jd_rules["min_exp"] else 0
+
+    # Keyword match (60)
+    matches = 0
+    for kw in jd_rules["keywords"]:
+        if kw in profile_text.lower():
+            matches += 1
+
+    score += int((matches / len(jd_rules["keywords"])) * 60)
+
+    return min(score, 100)
+
+
+# -------- AI: STRENGTHS + GAPS --------
+def get_strengths_gaps(jd_text, resume_text):
     prompt = f"""
-Extract structured candidate data.
-
-Resume:
-{resume_text}
-
-Return ONLY JSON:
-
-{{
-  "name": "",
-  "education": [],
-  "skills": [],
-  "experience_years": ""
-}}
-
-IMPORTANT:
-- Infer missing info
-- Keep education ordered highest first
-"""
-
-    response = client.messages.create(
-        model="claude-sonnet-4-0",
-        max_tokens=400,
-        messages=[{"role": "user", "content": prompt}]
-    )
-
-    return safe_json_load(response.content[0].text)
-
-
-# -------- SCORING --------
-def get_candidate_score(jd_text, profile):
-    prompt = f"""
-You are an expert recruiter.
+You are a hiring manager.
 
 Job Description:
 {jd_text}
 
-Candidate Profile:
-{profile}
+Resume:
+{resume_text}
 
-Return ONLY JSON:
+Give ONLY:
 
-{{
-  "score": 0-100,
-  "strengths": [],
-  "gaps": []
-}}
+- Strengths (1-3)
+- Gaps (1-3)
 
 RULES:
-- 1 to 3 strengths MAX (only if meaningful)
-- 1 to 3 gaps MAX (only if real gaps exist)
-- Avoid duplication
-- Each point ≤ 10 words
-- No filler content
-"""
+- No generic points
+- No repetition
+- Keep concise
+- Only meaningful insights
 
+Return JSON:
+
+{{
+ "strengths": [],
+ "gaps": []
+}}
+"""
     response = client.messages.create(
         model="claude-sonnet-4-0",
-        max_tokens=400,
+        max_tokens=250,
         messages=[{"role": "user", "content": prompt}]
     )
 
-    return safe_json_load(response.content[0].text)
+    try:
+        text = response.content[0].text
+        return json.loads(text[text.find("{"):text.rfind("}")+1])
+    except:
+        return {"strengths": [], "gaps": []}
 
 
-# -------- REPORT GENERATION --------
+# -------- EDUCATION FORMAT --------
+def format_education(education_list):
+    return education_list[0] if education_list else "N/A"
+
+
+# -------- REPORT --------
 def generate_report(top_candidates):
     doc = Document()
     doc.add_heading('Top Candidates Report', 0)
@@ -143,37 +145,32 @@ def generate_report(top_candidates):
 
         name = extract_candidate_name(candidate['file_name'])
 
-        # -------- TITLE --------
         p = doc.add_paragraph()
         run = p.add_run(f"{i}. {name} | Match: {candidate['score']}%")
         run.bold = True
 
-        # -------- FILE NAME --------
         doc.add_paragraph(f"File Name : {candidate['file_name']}")
 
-        # -------- EXPERIENCE + EDUCATION --------
         doc.add_paragraph(
             f"Experience: {candidate['experience']} years | "
             f"Education: {format_education(candidate['education'])}"
         )
 
-        # -------- TABLE --------
         table = doc.add_table(rows=1, cols=2)
         table.style = 'Table Grid'
 
-        hdr_cells = table.rows[0].cells
-        hdr_cells[0].text = "Strengths"
-        hdr_cells[1].text = "Gaps"
+        table.rows[0].cells[0].text = "Strengths"
+        table.rows[0].cells[1].text = "Gaps"
 
-        strengths = candidate.get('strengths', [])
-        gaps = candidate.get('gaps', [])
+        strengths = candidate.get("strengths", [])
+        gaps = candidate.get("gaps", [])
 
         max_len = max(len(strengths), len(gaps), 1)
 
         for j in range(max_len):
-            row_cells = table.add_row().cells
-            row_cells[0].text = strengths[j] if j < len(strengths) else ""
-            row_cells[1].text = gaps[j] if j < len(gaps) else ""
+            row = table.add_row().cells
+            row[0].text = strengths[j] if j < len(strengths) else ""
+            row[1].text = gaps[j] if j < len(gaps) else ""
 
         doc.add_paragraph("")
 
@@ -184,76 +181,52 @@ def generate_report(top_candidates):
     return buffer
 
 
-# -------- JD UPLOAD --------
-jd_file = st.file_uploader(
-    "Upload Job Description (PDF or DOCX)",
-    type=["pdf", "docx"]
-)
+# -------- UI --------
+jd_file = st.file_uploader("Upload Job Description", type=["pdf", "docx"])
+resume_files = st.file_uploader("Upload Resumes", type=["pdf", "docx"], accept_multiple_files=True)
 
-jd_text = ""
-if jd_file:
-    jd_text = extract_text(jd_file)
-    st.success("✅ Job Description uploaded")
-
-
-# -------- RESUME UPLOAD --------
-resume_files = st.file_uploader(
-    "Upload Resumes (PDF or DOCX)",
-    type=["pdf", "docx"],
-    accept_multiple_files=True
-)
-
-if resume_files:
-    st.success(f"✅ {len(resume_files)} resumes uploaded")
-
-
-# -------- TOP N SELECTOR --------
-top_n = st.slider(
-    "Select number of top candidates",
-    min_value=1,
-    max_value=20,
-    value=3
-)
-
-# -------- ANALYZE BUTTON --------
-analyze_clicked = st.button("🔍 Analyze Candidates")
+top_n = st.slider("Top Candidates", 1, 20, 3)
+analyze_clicked = st.button("Analyze")
 
 
 # -------- PIPELINE --------
 if analyze_clicked:
-    if not jd_text or not resume_files:
-        st.warning("⚠️ Please upload both Job Description and Resumes")
+    if not jd_file or not resume_files:
+        st.warning("Upload JD and resumes")
     else:
-        with st.spinner("Analyzing candidates..."):
-            results = []
+        jd_text = extract_text(jd_file)
+        jd_rules = extract_jd_rules(jd_text)
 
-            for file in resume_files:
-                resume_text = extract_text(file)[:3000]
+        results = []
 
-                profile = extract_candidate_profile(resume_text)
-                analysis = get_candidate_score(jd_text[:2000], profile)
+        for file in resume_files:
+            resume_text = extract_text(file)
 
-                results.append({
-                    "file_name": file.name,
-                    "score": analysis.get("score", 0),
-                    "strengths": analysis.get("strengths", []),
-                    "gaps": analysis.get("gaps", []),
-                    "experience": profile.get("experience_years", "N/A"),
-                    "education": profile.get("education", [])
-                })
+            experience = extract_experience(resume_text)
+            education = extract_education(resume_text)
 
-            sorted_results = sorted(results, key=lambda x: x["score"], reverse=True)
+            score = calculate_score(resume_text, jd_rules, experience)
 
-            buffer_n = int(top_n * 2.5)
-            top_candidates = sorted_results[:buffer_n]
+            ai_output = get_strengths_gaps(jd_text[:1500], resume_text[:2000])
 
-        st.success("✅ Analysis complete")
+            results.append({
+                "file_name": file.name,
+                "score": score,
+                "strengths": ai_output.get("strengths", []),
+                "gaps": ai_output.get("gaps", []),
+                "experience": experience,
+                "education": education
+            })
 
-        report_file = generate_report(top_candidates)
+        sorted_results = sorted(results, key=lambda x: x["score"], reverse=True)
+        top_candidates = sorted_results[:top_n]
+
+        st.success("Analysis complete")
+
+        report = generate_report(top_candidates)
 
         st.download_button(
-            label="📄 Download Report",
-            data=report_file,
-            file_name="Top_Candidates_Report.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            "Download Report",
+            report,
+            "Top_Candidates_Report.docx"
         )
