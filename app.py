@@ -29,31 +29,59 @@ def extract_text(file):
 
 # -------- NAME CLEANER --------
 def extract_candidate_name(file_name):
-    name = file_name.replace(".pdf", "").replace(".docx", "")
-    name = name.replace("Resume", "").replace("_", " ").strip()
-    return name
+    return file_name.replace(".pdf", "").replace(".docx", "").replace("Resume", "").replace("_", " ").strip()
 
 
-# -------- RULE: EXPERIENCE --------
+# -------- EXPERIENCE (FIXED) --------
 def extract_experience(text):
-    matches = re.findall(r'(\d+\.?\d*)\s*(years|year|yrs)', text.lower())
-    if matches:
-        return max([float(m[0]) for m in matches])
-    return 0
+    text = text.lower()
+
+    years = re.findall(r'(\d+)\+?\s*(years|year|yrs)', text)
+    months = re.findall(r'(\d+)\s*(months|month)', text)
+
+    total_months = 0
+
+    if years:
+        total_months += int(years[0][0]) * 12
+
+    if months:
+        total_months += int(months[0][0])
+
+    if total_months == 0:
+        return "0"
+
+    y = total_months // 12
+    m = total_months % 12
+
+    if y > 0 and m > 0:
+        return f"{y} years {m} months"
+    elif y > 0:
+        return f"{y} years"
+    else:
+        return f"{m} months"
 
 
-# -------- RULE: EDUCATION --------
+# -------- EDUCATION (FIXED PRIORITY) --------
 def extract_education(text):
-    degrees = ["m.com", "mba", "b.com", "bba", "b.sc", "m.sc"]
-    for d in degrees:
-        if d in text.lower():
-            return [d.upper()]
-    return ["N/A"]
+    text = text.lower()
+
+    if "m.com" in text:
+        return ["M.COM"]
+    elif "mba" in text:
+        return ["MBA"]
+    elif "b.com" in text:
+        return ["BCOM"]
+    elif "bba" in text:
+        return ["BBA"]
+    elif "b.sc" in text:
+        return ["BSC"]
+    else:
+        return ["N/A"]
 
 
-# -------- RULE: JD REQUIREMENTS --------
+# -------- JD RULES --------
 def extract_jd_rules(jd_text):
-    exp_match = re.findall(r'(\d+)\s*[-–]\s*(\d+)\s*years', jd_text.lower())
+    exp_match = re.findall(r'(\d+)\s*[-–]\s*(\d+)', jd_text)
     if exp_match:
         min_exp = int(exp_match[0][0])
         max_exp = int(exp_match[0][1])
@@ -61,6 +89,7 @@ def extract_jd_rules(jd_text):
         min_exp, max_exp = 0, 10
 
     keywords = ["tally", "gst", "tds", "excel", "accounting"]
+
     return {
         "min_exp": min_exp,
         "max_exp": max_exp,
@@ -68,28 +97,29 @@ def extract_jd_rules(jd_text):
     }
 
 
-# -------- RULE: MATCH SCORE --------
-def calculate_score(profile_text, jd_rules, experience):
+# -------- SCORE (DETERMINISTIC) --------
+def calculate_score(resume_text, jd_rules, experience_str):
     score = 0
 
-    # Experience (40)
-    if experience >= jd_rules["min_exp"]:
+    # convert experience string to years
+    exp_years = 0
+    if "year" in experience_str:
+        exp_years = int(re.findall(r'\d+', experience_str)[0])
+
+    # Experience weight (40)
+    if exp_years >= jd_rules["min_exp"]:
         score += 40
     else:
-        score += int((experience / jd_rules["min_exp"]) * 40) if jd_rules["min_exp"] else 0
+        score += int((exp_years / jd_rules["min_exp"]) * 40) if jd_rules["min_exp"] else 0
 
     # Keyword match (60)
-    matches = 0
-    for kw in jd_rules["keywords"]:
-        if kw in profile_text.lower():
-            matches += 1
-
+    matches = sum(1 for kw in jd_rules["keywords"] if kw in resume_text.lower())
     score += int((matches / len(jd_rules["keywords"])) * 60)
 
     return min(score, 100)
 
 
-# -------- AI: STRENGTHS + GAPS --------
+# -------- AI: STRENGTHS & GAPS (FIXED) --------
 def get_strengths_gaps(jd_text, resume_text):
     prompt = f"""
 You are a hiring manager.
@@ -100,16 +130,15 @@ Job Description:
 Resume:
 {resume_text}
 
-Give ONLY:
-
-- Strengths (1-3)
-- Gaps (1-3)
+Give ONLY meaningful insights.
 
 RULES:
-- No generic points
-- No repetition
-- Keep concise
-- Only meaningful insights
+- DO NOT force 3 points
+- Give ONLY actual strengths (1–3)
+- Give ONLY real gaps (0–3)
+- Avoid repetition
+- Avoid generic JD gaps
+- Keep each point short
 
 Return JSON:
 
@@ -120,7 +149,7 @@ Return JSON:
 """
     response = client.messages.create(
         model="claude-sonnet-4-0",
-        max_tokens=250,
+        max_tokens=200,
         messages=[{"role": "user", "content": prompt}]
     )
 
@@ -152,7 +181,7 @@ def generate_report(top_candidates):
         doc.add_paragraph(f"File Name : {candidate['file_name']}")
 
         doc.add_paragraph(
-            f"Experience: {candidate['experience']} years | "
+            f"Experience: {candidate['experience']} | "
             f"Education: {format_education(candidate['education'])}"
         )
 
@@ -207,7 +236,7 @@ if analyze_clicked:
 
             score = calculate_score(resume_text, jd_rules, experience)
 
-            ai_output = get_strengths_gaps(jd_text[:1500], resume_text[:2000])
+            ai_output = get_strengths_gaps(jd_text[:1200], resume_text[:1500])
 
             results.append({
                 "file_name": file.name,
