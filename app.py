@@ -98,74 +98,81 @@ IMPORTANT:
     return safe_json_load(response.content[0].text)
 
 
-# -------- RULE-BASED SCORING --------
+# -------- SCORING --------
 def get_candidate_score(jd_text, profile):
+    prompt = f"""
+You are an expert recruiter.
 
-    jd_text_lower = jd_text.lower()
+Job Description:
+{jd_text}
+
+Candidate Profile:
+{profile}
+
+Return ONLY JSON:
+
+{{
+  "score": 0-100,
+  "strengths": [],
+  "gaps": []
+}}
+
+RULES:
+- 1 to 3 strengths MAX (only if meaningful)
+- 1 to 3 gaps MAX (only if real gaps exist)
+- Avoid duplication
+- Each point ≤ 10 words
+- No filler content
+"""
+
+    response = client.messages.create(
+        model="claude-sonnet-4-0",
+        max_tokens=400,
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    return safe_json_load(response.content[0].text)
+
+def compute_rule_based_score(jd_text, profile):
+    jd_text = jd_text.lower()
 
     candidate_skills = [s.lower() for s in profile.get("skills", [])]
-    experience = profile.get("experience_years", "0")
+    experience = profile.get("experience_years", "")
 
     # ---- SKILL MATCH ----
-    matched_skills = [s for s in candidate_skills if s in jd_text_lower]
-    skill_score = min(len(matched_skills) * 10, 50)  # max 50
+    matched_skills = sum(1 for skill in candidate_skills if skill in jd_text)
+    total_skills = len(candidate_skills) if candidate_skills else 1
+    skill_score = (matched_skills / total_skills) * 50
 
     # ---- EXPERIENCE MATCH ----
+    exp_score = 0
     try:
-        exp_num = float(str(experience).split()[0])
+        exp_num = float(experience.split()[0])
+        if exp_num >= 5:
+            exp_score = 30
+        elif exp_num >= 2:
+            exp_score = 20
+        elif exp_num > 0:
+            exp_score = 10
     except:
-        exp_num = 0
-
-    if exp_num >= 5:
-        exp_score = 30
-    elif exp_num >= 2:
-        exp_score = 20
-    elif exp_num > 0:
-        exp_score = 10
-    else:
         exp_score = 0
 
     # ---- EDUCATION MATCH ----
-    education_text = str(profile.get("education", "")).lower()
+    education = profile.get("education", [])
+    edu_score = 0
 
-    if any(x in education_text for x in ["mba", "btech", "mtech", "engineer"]):
-        edu_score = 20
-    else:
-        edu_score = 10
+    if education:
+        edu_text = str(education[0]).lower()
+        if any(x in edu_text for x in ["btech", "be", "engineering"]):
+            edu_score = 20
+        elif any(x in edu_text for x in ["bcom", "bba", "mba"]):
+            edu_score = 15
 
-    # ---- FINAL SCORE ----
-    total_score = skill_score + exp_score + edu_score
-    total_score = min(total_score, 100)
-
-    # ---- STRENGTHS ----
-    strengths = []
-    if matched_skills:
-        strengths.append(f"{len(matched_skills)} relevant skills matched")
-
-    if exp_score >= 20:
-        strengths.append("Good relevant experience")
-
-    if edu_score == 20:
-        strengths.append("Strong educational background")
-
-    # ---- GAPS ----
-    gaps = []
-    if len(matched_skills) < 2:
-        gaps.append("Low skill match")
-
-    if exp_score <= 10:
-        gaps.append("Limited experience")
-
-    if edu_score == 10:
-        gaps.append("Average education relevance")
+    final_score = int(skill_score + exp_score + edu_score)
 
     return {
-        "score": total_score,
-        "strengths": strengths[:3],
-        "gaps": gaps[:3]
+        "score": min(final_score, 100)
     }
-
-
 # -------- REPORT GENERATION --------
 def generate_report(top_candidates):
     doc = Document()
@@ -175,17 +182,21 @@ def generate_report(top_candidates):
 
         name = extract_candidate_name(candidate['file_name'])
 
+        # -------- TITLE --------
         p = doc.add_paragraph()
         run = p.add_run(f"{i}. {name} | Match: {candidate['score']}%")
         run.bold = True
 
+        # -------- FILE NAME --------
         doc.add_paragraph(f"File Name : {candidate['file_name']}")
 
+        # -------- EXPERIENCE + EDUCATION --------
         doc.add_paragraph(
             f"Experience: {candidate['experience']} years | "
             f"Education: {format_education(candidate['education'])}"
         )
 
+        # -------- TABLE --------
         table = doc.add_table(rows=1, cols=2)
         table.style = 'Table Grid'
 
@@ -259,7 +270,11 @@ if analyze_clicked:
                 resume_text = extract_text(file)[:3000]
 
                 profile = extract_candidate_profile(resume_text)
+                rule_score = compute_rule_based_score(jd_text[:2000], profile)
                 analysis = get_candidate_score(jd_text[:2000], profile)
+
+                # override LLM score with rule-based score
+                analysis["score"] = rule_score["score"]
 
                 results.append({
                     "file_name": file.name,
