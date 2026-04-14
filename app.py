@@ -27,145 +27,134 @@ def extract_text(file):
         return "\n".join([para.text for para in doc.paragraphs])
 
 
+# -------- SAFE JSON PARSER --------
+def safe_json_load(text):
+    try:
+        start = text.find("{")
+        end = text.rfind("}") + 1
+        return json.loads(text[start:end])
+    except:
+        return {}
+
+
 # -------- NAME CLEANER --------
 def extract_candidate_name(file_name):
-    return file_name.replace(".pdf", "").replace(".docx", "").replace("Resume", "").replace("_", " ").strip()
+    name = file_name.replace(".pdf", "").replace(".docx", "")
+    name = name.replace("Resume", "").replace("_", " ").strip()
+    return name
 
 
-# -------- EXPERIENCE (FIXED) --------
-def extract_experience(text):
-    text = text.lower()
+# -------- EDUCATION FORMATTER --------
+def format_education(education_list):
+    if not education_list:
+        return "N/A"
 
-    years = re.findall(r'(\d+)\+?\s*(years|year|yrs)', text)
-    months = re.findall(r'(\d+)\s*(months|month)', text)
+    edu = education_list[0]
 
-    total_months = 0
+    if isinstance(edu, dict):
+        degree = edu.get("degree", "")
+        college = edu.get("institution", "")
+        year = edu.get("year", "")
+        grade = edu.get("grade", "")
 
-    if years:
-        total_months += int(years[0][0]) * 12
+        parts = [degree, college, year]
+        base = ", ".join([p for p in parts if p])
 
-    if months:
-        total_months += int(months[0][0])
+        if grade:
+            base += f", Grade: {grade}"
 
-    if total_months == 0:
-        return "0"
+        return base
 
-    y = total_months // 12
-    m = total_months % 12
-
-    if y > 0 and m > 0:
-        return f"{y} years {m} months"
-    elif y > 0:
-        return f"{y} years"
-    else:
-        return f"{m} months"
+    return str(edu)
 
 
-# -------- EDUCATION (FIXED PRIORITY) --------
-def extract_education(text):
-    text = text.lower()
+# -------- RULE BASED SCORE (NEW) --------
+def calculate_rule_score(jd_text, resume_text):
+    jd_text = jd_text.lower()
+    resume_text = resume_text.lower()
 
-    if "m.com" in text:
-        return ["M.COM"]
-    elif "mba" in text:
-        return ["MBA"]
-    elif "b.com" in text:
-        return ["BCOM"]
-    elif "bba" in text:
-        return ["BBA"]
-    elif "b.sc" in text:
-        return ["BSC"]
-    else:
-        return ["N/A"]
+    # Extract keywords from JD (simple but deterministic)
+    keywords = ["tally", "gst", "tds", "excel", "accounting", "reconciliation", "invoice"]
 
+    # Experience extraction
+    exp_match = re.findall(r'(\d+\.?\d*)\s*(years|year|yrs)', resume_text)
+    experience = float(exp_match[0][0]) if exp_match else 0
 
-# -------- JD RULES --------
-def extract_jd_rules(jd_text):
-    exp_match = re.findall(r'(\d+)\s*[-–]\s*(\d+)', jd_text)
-    if exp_match:
-        min_exp = int(exp_match[0][0])
-        max_exp = int(exp_match[0][1])
-    else:
-        min_exp, max_exp = 0, 10
-
-    keywords = ["tally", "gst", "tds", "excel", "accounting"]
-
-    return {
-        "min_exp": min_exp,
-        "max_exp": max_exp,
-        "keywords": keywords
-    }
-
-
-# -------- SCORE (DETERMINISTIC) --------
-def calculate_score(resume_text, jd_rules, experience_str):
     score = 0
 
-    # convert experience string to years
-    exp_years = 0
-    if "year" in experience_str:
-        exp_years = int(re.findall(r'\d+', experience_str)[0])
-
     # Experience weight (40)
-    if exp_years >= jd_rules["min_exp"]:
+    if experience >= 2:
         score += 40
-    else:
-        score += int((exp_years / jd_rules["min_exp"]) * 40) if jd_rules["min_exp"] else 0
+    elif experience > 0:
+        score += int((experience / 2) * 40)
 
     # Keyword match (60)
-    matches = sum(1 for kw in jd_rules["keywords"] if kw in resume_text.lower())
-    score += int((matches / len(jd_rules["keywords"])) * 60)
+    matches = sum(1 for kw in keywords if kw in resume_text)
+    score += int((matches / len(keywords)) * 60)
 
     return min(score, 100)
 
 
-# -------- AI: STRENGTHS & GAPS (FIXED) --------
-def get_strengths_gaps(jd_text, resume_text):
+# -------- PROFILE EXTRACTION --------
+def extract_candidate_profile(resume_text):
     prompt = f"""
-You are a hiring manager.
-
-Job Description:
-{jd_text}
+Extract structured candidate data.
 
 Resume:
 {resume_text}
 
-Give ONLY meaningful insights.
-
-RULES:
-- DO NOT force 3 points
-- Give ONLY actual strengths (1–3)
-- Give ONLY real gaps (0–3)
-- Avoid repetition
-- Avoid generic JD gaps
-- Keep each point short
-
-Return JSON:
+Return ONLY JSON:
 
 {{
- "strengths": [],
- "gaps": []
+  "name": "",
+  "education": [],
+  "skills": [],
+  "experience_years": ""
 }}
 """
     response = client.messages.create(
         model="claude-sonnet-4-0",
-        max_tokens=200,
+        max_tokens=400,
         messages=[{"role": "user", "content": prompt}]
     )
 
-    try:
-        text = response.content[0].text
-        return json.loads(text[text.find("{"):text.rfind("}")+1])
-    except:
-        return {"strengths": [], "gaps": []}
+    return safe_json_load(response.content[0].text)
 
 
-# -------- EDUCATION FORMAT --------
-def format_education(education_list):
-    return education_list[0] if education_list else "N/A"
+# -------- SCORING (AI ONLY FOR INSIGHTS NOW) --------
+def get_candidate_score(jd_text, profile):
+    prompt = f"""
+You are an expert recruiter.
+
+Job Description:
+{jd_text}
+
+Candidate Profile:
+{profile}
+
+Return ONLY JSON:
+
+{{
+  "strengths": [],
+  "gaps": []
+}}
+
+RULES:
+- 1 to 3 strengths MAX
+- 1 to 3 gaps MAX
+- Avoid duplication
+- Keep concise
+"""
+    response = client.messages.create(
+        model="claude-sonnet-4-0",
+        max_tokens=300,
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    return safe_json_load(response.content[0].text)
 
 
-# -------- REPORT --------
+# -------- REPORT GENERATION --------
 def generate_report(top_candidates):
     doc = Document()
     doc.add_heading('Top Candidates Report', 0)
@@ -181,7 +170,7 @@ def generate_report(top_candidates):
         doc.add_paragraph(f"File Name : {candidate['file_name']}")
 
         doc.add_paragraph(
-            f"Experience: {candidate['experience']} | "
+            f"Experience: {candidate['experience']} years | "
             f"Education: {format_education(candidate['education'])}"
         )
 
@@ -191,15 +180,15 @@ def generate_report(top_candidates):
         table.rows[0].cells[0].text = "Strengths"
         table.rows[0].cells[1].text = "Gaps"
 
-        strengths = candidate.get("strengths", [])
-        gaps = candidate.get("gaps", [])
+        strengths = candidate.get('strengths', [])
+        gaps = candidate.get('gaps', [])
 
         max_len = max(len(strengths), len(gaps), 1)
 
         for j in range(max_len):
-            row = table.add_row().cells
-            row[0].text = strengths[j] if j < len(strengths) else ""
-            row[1].text = gaps[j] if j < len(gaps) else ""
+            row_cells = table.add_row().cells
+            row_cells[0].text = strengths[j] if j < len(strengths) else ""
+            row_cells[1].text = gaps[j] if j < len(gaps) else ""
 
         doc.add_paragraph("")
 
@@ -210,52 +199,81 @@ def generate_report(top_candidates):
     return buffer
 
 
-# -------- UI --------
-jd_file = st.file_uploader("Upload Job Description", type=["pdf", "docx"])
-resume_files = st.file_uploader("Upload Resumes", type=["pdf", "docx"], accept_multiple_files=True)
+# -------- JD UPLOAD --------
+jd_file = st.file_uploader(
+    "Upload Job Description (PDF or DOCX)",
+    type=["pdf", "docx"]
+)
 
-top_n = st.slider("Top Candidates", 1, 20, 3)
-analyze_clicked = st.button("Analyze")
+jd_text = ""
+if jd_file:
+    jd_text = extract_text(jd_file)
+    st.success("✅ Job Description uploaded")
+
+
+# -------- RESUME UPLOAD --------
+resume_files = st.file_uploader(
+    "Upload Resumes (PDF or DOCX)",
+    type=["pdf", "docx"],
+    accept_multiple_files=True
+)
+
+if resume_files:
+    st.success(f"✅ {len(resume_files)} resumes uploaded")
+
+
+# -------- TOP N SELECTOR --------
+top_n = st.slider(
+    "Select number of top candidates",
+    min_value=1,
+    max_value=20,
+    value=3
+)
+
+# -------- ANALYZE BUTTON --------
+analyze_clicked = st.button("🔍 Analyze Candidates")
 
 
 # -------- PIPELINE --------
 if analyze_clicked:
-    if not jd_file or not resume_files:
-        st.warning("Upload JD and resumes")
+    if not jd_text or not resume_files:
+        st.warning("⚠️ Please upload both Job Description and Resumes")
     else:
-        jd_text = extract_text(jd_file)
-        jd_rules = extract_jd_rules(jd_text)
+        with st.spinner("Analyzing candidates..."):
+            results = []
 
-        results = []
+            for file in resume_files:
+                resume_text = extract_text(file)[:3000]
 
-        for file in resume_files:
-            resume_text = extract_text(file)
+                profile = extract_candidate_profile(resume_text)
 
-            experience = extract_experience(resume_text)
-            education = extract_education(resume_text)
+                # AI only for strengths/gaps
+                analysis = get_candidate_score(jd_text[:2000], profile)
 
-            score = calculate_score(resume_text, jd_rules, experience)
+                # RULE-based score (NEW)
+                score = calculate_rule_score(jd_text, resume_text)
 
-            ai_output = get_strengths_gaps(jd_text[:1200], resume_text[:1500])
+                results.append({
+                    "file_name": file.name,
+                    "score": score,
+                    "strengths": analysis.get("strengths", []),
+                    "gaps": analysis.get("gaps", []),
+                    "experience": profile.get("experience_years", "N/A"),
+                    "education": profile.get("education", [])
+                })
 
-            results.append({
-                "file_name": file.name,
-                "score": score,
-                "strengths": ai_output.get("strengths", []),
-                "gaps": ai_output.get("gaps", []),
-                "experience": experience,
-                "education": education
-            })
+            sorted_results = sorted(results, key=lambda x: x["score"], reverse=True)
 
-        sorted_results = sorted(results, key=lambda x: x["score"], reverse=True)
-        top_candidates = sorted_results[:top_n]
+            buffer_n = int(top_n * 2.5)
+            top_candidates = sorted_results[:buffer_n]
 
-        st.success("Analysis complete")
+        st.success("✅ Analysis complete")
 
-        report = generate_report(top_candidates)
+        report_file = generate_report(top_candidates)
 
         st.download_button(
-            "Download Report",
-            report,
-            "Top_Candidates_Report.docx"
+            label="📄 Download Report",
+            data=report_file,
+            file_name="Top_Candidates_Report.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         )
