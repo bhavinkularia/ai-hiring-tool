@@ -5,7 +5,6 @@ import anthropic
 import os
 from io import BytesIO
 import json
-import re
 
 # -------- CONFIG --------
 client = anthropic.Anthropic(
@@ -68,33 +67,6 @@ def format_education(education_list):
     return str(edu)
 
 
-# -------- RULE BASED SCORE (NEW) --------
-def calculate_rule_score(jd_text, resume_text):
-    jd_text = jd_text.lower()
-    resume_text = resume_text.lower()
-
-    # Extract keywords from JD (simple but deterministic)
-    keywords = ["tally", "gst", "tds", "excel", "accounting", "reconciliation", "invoice"]
-
-    # Experience extraction
-    exp_match = re.findall(r'(\d+\.?\d*)\s*(years|year|yrs)', resume_text)
-    experience = float(exp_match[0][0]) if exp_match else 0
-
-    score = 0
-
-    # Experience weight (40)
-    if experience >= 2:
-        score += 40
-    elif experience > 0:
-        score += int((experience / 2) * 40)
-
-    # Keyword match (60)
-    matches = sum(1 for kw in keywords if kw in resume_text)
-    score += int((matches / len(keywords)) * 60)
-
-    return min(score, 100)
-
-
 # -------- PROFILE EXTRACTION --------
 def extract_candidate_profile(resume_text):
     prompt = f"""
@@ -111,7 +83,12 @@ Return ONLY JSON:
   "skills": [],
   "experience_years": ""
 }}
+
+IMPORTANT:
+- Infer missing info
+- Keep education ordered highest first
 """
+
     response = client.messages.create(
         model="claude-sonnet-4-0",
         max_tokens=400,
@@ -121,37 +98,72 @@ Return ONLY JSON:
     return safe_json_load(response.content[0].text)
 
 
-# -------- SCORING (AI ONLY FOR INSIGHTS NOW) --------
+# -------- RULE-BASED SCORING --------
 def get_candidate_score(jd_text, profile):
-    prompt = f"""
-You are an expert recruiter.
 
-Job Description:
-{jd_text}
+    jd_text_lower = jd_text.lower()
 
-Candidate Profile:
-{profile}
+    candidate_skills = [s.lower() for s in profile.get("skills", [])]
+    experience = profile.get("experience_years", "0")
 
-Return ONLY JSON:
+    # ---- SKILL MATCH ----
+    matched_skills = [s for s in candidate_skills if s in jd_text_lower]
+    skill_score = min(len(matched_skills) * 10, 50)  # max 50
 
-{{
-  "strengths": [],
-  "gaps": []
-}}
+    # ---- EXPERIENCE MATCH ----
+    try:
+        exp_num = float(str(experience).split()[0])
+    except:
+        exp_num = 0
 
-RULES:
-- 1 to 3 strengths MAX
-- 1 to 3 gaps MAX
-- Avoid duplication
-- Keep concise
-"""
-    response = client.messages.create(
-        model="claude-sonnet-4-0",
-        max_tokens=300,
-        messages=[{"role": "user", "content": prompt}]
-    )
+    if exp_num >= 5:
+        exp_score = 30
+    elif exp_num >= 2:
+        exp_score = 20
+    elif exp_num > 0:
+        exp_score = 10
+    else:
+        exp_score = 0
 
-    return safe_json_load(response.content[0].text)
+    # ---- EDUCATION MATCH ----
+    education_text = str(profile.get("education", "")).lower()
+
+    if any(x in education_text for x in ["mba", "btech", "mtech", "engineer"]):
+        edu_score = 20
+    else:
+        edu_score = 10
+
+    # ---- FINAL SCORE ----
+    total_score = skill_score + exp_score + edu_score
+    total_score = min(total_score, 100)
+
+    # ---- STRENGTHS ----
+    strengths = []
+    if matched_skills:
+        strengths.append(f"{len(matched_skills)} relevant skills matched")
+
+    if exp_score >= 20:
+        strengths.append("Good relevant experience")
+
+    if edu_score == 20:
+        strengths.append("Strong educational background")
+
+    # ---- GAPS ----
+    gaps = []
+    if len(matched_skills) < 2:
+        gaps.append("Low skill match")
+
+    if exp_score <= 10:
+        gaps.append("Limited experience")
+
+    if edu_score == 10:
+        gaps.append("Average education relevance")
+
+    return {
+        "score": total_score,
+        "strengths": strengths[:3],
+        "gaps": gaps[:3]
+    }
 
 
 # -------- REPORT GENERATION --------
@@ -177,8 +189,9 @@ def generate_report(top_candidates):
         table = doc.add_table(rows=1, cols=2)
         table.style = 'Table Grid'
 
-        table.rows[0].cells[0].text = "Strengths"
-        table.rows[0].cells[1].text = "Gaps"
+        hdr_cells = table.rows[0].cells
+        hdr_cells[0].text = "Strengths"
+        hdr_cells[1].text = "Gaps"
 
         strengths = candidate.get('strengths', [])
         gaps = candidate.get('gaps', [])
@@ -246,16 +259,11 @@ if analyze_clicked:
                 resume_text = extract_text(file)[:3000]
 
                 profile = extract_candidate_profile(resume_text)
-
-                # AI only for strengths/gaps
                 analysis = get_candidate_score(jd_text[:2000], profile)
-
-                # RULE-based score (NEW)
-                score = calculate_rule_score(jd_text, resume_text)
 
                 results.append({
                     "file_name": file.name,
-                    "score": score,
+                    "score": analysis.get("score", 0),
                     "strengths": analysis.get("strengths", []),
                     "gaps": analysis.get("gaps", []),
                     "experience": profile.get("experience_years", "N/A"),
